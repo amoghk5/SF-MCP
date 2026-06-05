@@ -95,7 +95,7 @@ export class ODataSession {
       signal: this._timeoutSignal(),
     };
 
-    let res = await fetch(url, fetchOpts);
+    let res = await this._fetchWithRetry(url, fetchOpts);
 
     // CSRF expired mid-session — refresh and retry once
     if (res.status === 403) {
@@ -103,7 +103,7 @@ export class ODataSession {
       if (errText.includes('CSRF')) {
         this.csrfToken = null;
         headers['x-csrf-token'] = await this.getCSRF();
-        res = await fetch(url, { ...fetchOpts, headers, signal: this._timeoutSignal() });
+        res = await this._fetchWithRetry(url, { ...fetchOpts, headers });
       } else {
         return res;
       }
@@ -115,6 +115,20 @@ export class ODataSession {
     }
 
     return res;
+  }
+
+  /** Retry once on transient network errors (ECONNRESET, ECONNREFUSED) after a short back-off. */
+  async _fetchWithRetry(url, fetchOpts) {
+    const TRANSIENT = new Set(['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT']);
+    try {
+      return await fetch(url, { ...fetchOpts, signal: this._timeoutSignal() });
+    } catch (err) {
+      if (TRANSIENT.has(err.cause?.code)) {
+        await new Promise(r => setTimeout(r, 2000));
+        return await fetch(url, { ...fetchOpts, signal: this._timeoutSignal() });
+      }
+      throw err;
+    }
   }
 
   async _retryAfter429(lastRes, url, fetchOpts) {

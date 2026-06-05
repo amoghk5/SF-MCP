@@ -125,8 +125,11 @@ async function wrap(handler, args) {
     const result = await handler(args);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   } catch (err) {
+    const detail = err.cause
+      ? `${err.message} (${err.cause.code ?? err.cause.message ?? String(err.cause)})`
+      : err.message;
     return {
-      content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }],
+      content: [{ type: 'text', text: JSON.stringify({ error: detail }) }],
       isError: true,
     };
   }

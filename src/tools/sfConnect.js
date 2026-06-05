@@ -71,7 +71,10 @@ export async function sfConnectHandler({ action, alias, apiHost, uiHost, usernam
         await session.fetchCSRF();
         return { text: `Connection "${resolvedAlias}" works. OData auth verified.` };
       } catch (err) {
-        return { error: `Test failed: ${err.message}` };
+        const detail = err.cause
+          ? `${err.message} — ${err.cause.code ?? err.cause.message ?? String(err.cause)}`
+          : err.message;
+        return { error: `Test failed: ${detail}` };
       }
     }
 
