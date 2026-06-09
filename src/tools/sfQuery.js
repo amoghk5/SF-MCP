@@ -33,11 +33,13 @@ export async function sfQueryHandler({ entity, filter, select, expand, top = 20,
   // so the schema is ready for any subsequent upsert against the same entity.
   EntitySchemaCache.fetchAndCache(alias, entity, session).catch(() => {});
 
+  // paging=snapshot rejects $top/$skip — only add them for non-snapshot modes
+  const isSnapshot = paging === 'snapshot';
   const safeTop = Math.min(Math.max(1, top ?? 20), 1000);
   const params = new URLSearchParams();
   params.set('$format', 'json');
-  params.set('$top', String(safeTop));
-  if (skip) params.set('$skip', String(skip));
+  if (!isSnapshot) params.set('$top', String(safeTop));
+  if (!isSnapshot && skip) params.set('$skip', String(skip));
   if (filter) params.set('$filter', filter);
   if (select) params.set('$select', select);
   if (expand) params.set('$expand', expand);
