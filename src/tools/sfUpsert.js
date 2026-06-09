@@ -2,38 +2,21 @@ import { ConnectionRegistry } from '../ConnectionRegistry.js';
 import { sessionCache } from '../auth/SessionCache.js';
 import { EntitySchemaCache } from '../EntitySchemaCache.js';
 
-export const sfUpsertTool = {
-  name: 'sf_upsert',
-  description: 'Create or update records in any SAP SuccessFactors OData v2 entity. Handles CSRF tokens automatically. Pass a single record object or an array for batch upsert (max 1000). Use sf_metadata first if unsure about required fields.',
+import { z } from 'zod';
+import { connOpt } from './shared.js';
+
+export const sfUpsertSchema = {
+  description: 'Create or update records in any SAP SuccessFactors OData v2 entity. CSRF tokens handled automatically. Pass a single record or array for batch (max 1000). Use sf_metadata first if unsure about required fields.',
   inputSchema: {
-    type: 'object',
-    properties: {
-      entity: { type: 'string', description: 'Entity set name (e.g. "Position", "cust_stressTest4M")' },
-      payload: {
-        description: 'A single record object or array of records to upsert',
-        oneOf: [
-          { type: 'object' },
-          { type: 'array', items: { type: 'object' } },
-        ],
-      },
-      purgeType: {
-        type: 'string',
-        enum: ['incremental', 'full', 'fullPurge', 'record'],
-        description: 'Upsert mode: incremental (default, update only provided fields), full/fullPurge (replace entire record), record (delete+insert)',
-      },
-      workflowConfirmed: {
-        type: 'boolean',
-        description: 'Set true to trigger workflow on upsert for non-admin users. Required when the entity has workflow routing enabled — without it, upsert fails with HTTP 500 for non-admin users. Has no effect for admin users.',
-      },
-      warningAcknowledged: {
-        type: 'boolean',
-        description: 'Set true to bypass warning business rules on upsert for non-admin users. Required when a warning rule fires — without it, upsert fails. Has no effect for admin users.',
-      },
-      connection: { type: 'string', description: 'Connection alias to use. Omit for default.' },
-    },
-    required: ['entity', 'payload'],
+    entity: z.string().describe('Entity set name'),
+    payload: z.union([z.object({}).passthrough(), z.array(z.object({}).passthrough())]).describe('Single record or array of records to upsert'),
+    purgeType: z.enum(['incremental', 'full', 'fullPurge', 'record']).optional().describe('Upsert mode: incremental (default), full/fullPurge (replace record), record (delete+insert)'),
+    workflowConfirmed: z.boolean().optional().describe('Set true to trigger workflow on upsert for non-admin users. Required for workflow-enabled entities — without it, upsert fails with HTTP 500 for non-admin users.'),
+    warningAcknowledged: z.boolean().optional().describe('Set true to bypass warning business rules on upsert for non-admin users. Required when a warning rule fires — without it, upsert fails.'),
+    connection: connOpt,
   },
 };
+
 
 export async function sfUpsertHandler({ entity, payload, purgeType, workflowConfirmed, warningAcknowledged, connection }) {
   const { alias, conn } = ConnectionRegistry.resolve(connection);

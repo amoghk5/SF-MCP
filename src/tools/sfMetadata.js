@@ -2,28 +2,20 @@ import { ConnectionRegistry } from '../ConnectionRegistry.js';
 import { sessionCache } from '../auth/SessionCache.js';
 import { EntitySchemaCache } from '../EntitySchemaCache.js';
 
-export const sfMetadataTool = {
-  name: 'sf_metadata',
-  description: 'Explore the SAP SuccessFactors data model. Actions: get_entity (field names, types, and required flags for one entity), list_entities (all available entity sets), get_picklist (valid option codes for a picklist ID).',
+import { z } from 'zod';
+import { connOpt } from './shared.js';
+
+export const sfMetadataSchema = {
+  description: 'Explore the SF data model. get_entity: field names/types for one entity. list_entities: all available entity sets. get_picklist: valid option codes for a picklist. Results are cached.',
   inputSchema: {
-    type: 'object',
-    properties: {
-      action: {
-        type: 'string',
-        enum: ['get_entity', 'list_entities', 'get_picklist'],
-        description: 'What to retrieve',
-      },
-      entity: { type: 'string', description: 'Entity set name — required for get_entity' },
-      picklistId: { type: 'string', description: 'Picklist ID — required for get_picklist (e.g. "status", "ecJobCode")' },
-      forceRefresh: {
-        type: 'boolean',
-        description: 'For get_entity: bypass the 24h schema cache and re-fetch from SF. Use when a new field was added or the entity definition changed.',
-      },
-      connection: { type: 'string', description: 'Connection alias. Omit for default.' },
-    },
-    required: ['action'],
+    action: z.enum(['get_entity', 'list_entities', 'get_picklist']).describe('What to retrieve'),
+    entity: z.string().optional().describe('Entity set name — required for get_entity'),
+    picklistId: z.string().optional().describe('Picklist ID — required for get_picklist (e.g. "status")'),
+    forceRefresh: z.boolean().optional().describe('Bypass the 24h schema cache and re-fetch from SF. Use when a field was added or entity definition changed.'),
+    connection: connOpt,
   },
 };
+
 
 export async function sfMetadataHandler({ action, entity, picklistId, forceRefresh = false, connection }) {
   const { alias, conn } = ConnectionRegistry.resolve(connection);
