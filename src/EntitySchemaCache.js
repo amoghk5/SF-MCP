@@ -10,8 +10,17 @@
  * Fetch strategy per entity (in order):
  *  1. In-memory / disk cache (if fresh)
  *  2. Per-entity metadata  GET /{entity}/$metadata  (small, fast)
- *  3. Full $metadata        GET /$metadata           (ETag-cached, 5.9 MB)
+ *  3. Full $metadata        GET /$metadata           (ETag-cached, ~12 MB)
  *  4. Sample record         GET /{entity}?$top=1     (infers types from values)
+ *
+ * Field object shape (mirrors integrtr's attribute set):
+ *   name, type, key, required (sap:required), nullable (Nullable=false),
+ *   label, filterable, sortable, creatable, updatable, upsertable, visible,
+ *   picklist, displayFormat, maxLength, sensitive
+ *
+ * navFields shape:
+ *   name, label, toRole, upsertable, filterable, sortable, creatable, updatable,
+ *   visible, required, picklist, relationship, fromRole
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
@@ -41,7 +50,7 @@ function _saveDisk(store) {
 // ── In-memory store (initialised from disk at module load) ────────────────────
 
 let _store = _loadDisk();
-// _store.schemas: { "alias:Entity": { fields, keyFields, fetchedAt } }
+// _store.schemas: { "alias:Entity": { fields, navFields, keyFields, fetchedAt } }
 // _store.etags:   { "alias":        { etag, xml } }  — for full $metadata
 
 // ── Public cache API ──────────────────────────────────────────────────────────
@@ -57,9 +66,9 @@ export const EntitySchemaCache = {
   },
 
   /** Store a parsed field list for an entity. */
-  set(alias, entity, fields) {
+  set(alias, entity, fields, navFields = []) {
     const keyFields = fields.filter(f => f.key === true);
-    _store.schemas[`${alias}:${entity}`] = { fields, keyFields, fetchedAt: Date.now() };
+    _store.schemas[`${alias}:${entity}`] = { fields, navFields, keyFields, fetchedAt: Date.now() };
     _saveDisk(_store);
   },
 
@@ -87,7 +96,7 @@ export const EntitySchemaCache = {
    * @param {ODataSession} session        Authenticated session
    * @param {object}       [opts]
    * @param {boolean}      [opts.forceRefresh=false]  Skip cache, re-fetch from SF
-   * @returns {object|null}  { fields, keyFields, fetchedAt } or null on failure
+   * @returns {object|null}  { fields, navFields, keyFields, fetchedAt } or null on failure
    */
   async fetchAndCache(alias, entity, session, { forceRefresh = false } = {}) {
     if (!forceRefresh) {
@@ -95,39 +104,42 @@ export const EntitySchemaCache = {
       if (cached) return cached;
     }
 
-    let fields = null;
+    let parsed = null;
 
     // Strategy 1: per-entity $metadata (small payload, ~2–5 KB)
     try {
       const res = await session.request('GET', `/${entity}/$metadata`, undefined, { Accept: 'application/xml' });
       if (res.ok) {
         const xml = await res.text();
-        fields = _parseEntityFromXml(xml, entity);
+        parsed = _parseEntityFromXml(xml, entity);
       }
     } catch { /* fall through */ }
 
-    // Strategy 2: full $metadata with ETag caching (~5.9 MB, 304 if unchanged)
-    if (!fields) {
+    // Strategy 2: full $metadata with ETag caching (~12 MB, 304 if unchanged)
+    if (!parsed) {
       try {
         const xml = await _fetchFullMetadata(alias, session);
-        if (xml) fields = _parseEntityFromXml(xml, entity);
+        if (xml) parsed = _parseEntityFromXml(xml, entity);
       } catch { /* fall through */ }
     }
 
     // Strategy 3: infer schema from a sample record (no reliable key detection)
-    if (!fields) {
+    if (!parsed) {
       try {
         const res = await session.request('GET', `/${entity}?$top=1&$format=json`);
         if (res.ok) {
           const data = await res.json();
           const sample = data.d?.results?.[0] ?? data.d;
-          if (sample && typeof sample === 'object') fields = _inferFromSample(sample);
+          if (sample && typeof sample === 'object') {
+            const fields = _inferFromSample(sample);
+            if (fields.length > 0) parsed = { fields, navFields: [] };
+          }
         }
       } catch { /* give up */ }
     }
 
-    if (fields && fields.length > 0) {
-      this.set(alias, entity, fields);
+    if (parsed && parsed.fields.length > 0) {
+      this.set(alias, entity, parsed.fields, parsed.navFields);
       return this.get(alias, entity);
     }
 
@@ -157,6 +169,17 @@ async function _fetchFullMetadata(alias, session) {
 
 // ── XML parser ────────────────────────────────────────────────────────────────
 
+/**
+ * Parses a single EntityType from $metadata XML.
+ *
+ * Captures all attributes that integrtr tracks:
+ *   Property:           name, type, key, required (sap:required), nullable,
+ *                       label, filterable, sortable, creatable, updatable,
+ *                       upsertable, visible, picklist, displayFormat, maxLength, sensitive
+ *   NavigationProperty: name, label, toRole, relationship, fromRole,
+ *                       required, creatable, updatable, upsertable,
+ *                       filterable, sortable, visible, picklist
+ */
 function _parseEntityFromXml(xml, entityName) {
   const entityTypeRe = new RegExp(`<EntityType[^>]+Name="${entityName}"[\\s\\S]*?</EntityType>`, 'i');
   const entityMatch = xml.match(entityTypeRe);
@@ -164,7 +187,7 @@ function _parseEntityFromXml(xml, entityName) {
 
   const block = entityMatch[0];
 
-  // Declared key field names
+  // ── Key field names ────────────────────────────────────────────────────────
   const keyProps = new Set();
   const keyBlock = block.match(/<Key>([\s\S]*?)<\/Key>/);
   if (keyBlock) {
@@ -173,38 +196,89 @@ function _parseEntityFromXml(xml, entityName) {
     }
   }
 
+  // ── Properties ─────────────────────────────────────────────────────────────
   const fields = [];
   const propRe = /<Property\s([^>]+)(?:\/>|>[^<]*<\/Property>)/g;
   let m;
   while ((m = propRe.exec(block)) !== null) {
-    const attrs = m[1];
-    const name  = attrs.match(/Name="([^"]+)"/)?.[1];
-    const type  = attrs.match(/Type="([^"]+)"/)?.[1];
-    const nullable = attrs.match(/Nullable="([^"]+)"/)?.[1];
+    const a = m[1];
+    const attr = (name) => a.match(new RegExp(name.replace(':', '\\:') + '="([^"]+)"'))?.[1];
+
+    const name = attr('Name');
     if (!name) continue;
 
     const field = {
       name,
-      type:     type?.replace('Edm.', '') ?? 'Unknown',
+      type:     attr('Type')?.replace('Edm.', '') ?? 'Unknown',
       key:      keyProps.has(name),
-      required: nullable === 'false',
+      // sap:required = SF business rule; Nullable = OData schema constraint (different!)
+      required: attr('sap:required') === 'true',
+      nullable: attr('Nullable') !== 'false',  // false = non-nullable in OData schema
     };
 
-    const label      = attrs.match(/sap:label="([^"]+)"/)?.[1];
-    const filterable = attrs.match(/sap:filterable="([^"]+)"/)?.[1];
-    const sortable   = attrs.match(/sap:sortable="([^"]+)"/)?.[1];
-    const creatable  = attrs.match(/sap:creatable="([^"]+)"/)?.[1];
-    const updatable  = attrs.match(/sap:updatable="([^"]+)"/)?.[1];
-    if (label)                  field.label      = label;
-    if (filterable === 'false') field.filterable = false;
-    if (sortable   === 'false') field.sortable   = false;
-    if (creatable  === 'false') field.creatable  = false;
-    if (updatable  === 'false') field.updatable  = false;
+    // Conditionally add attributes only when they carry non-default values
+    // (keeps the object lean; omitted = "default / not specified")
+    const label    = attr('sap:label');
+    if (label) field.label = label;
+
+    const maxLen   = attr('MaxLength');
+    if (maxLen) field.maxLength = parseInt(maxLen, 10);
+
+    if (attr('sap:filterable') === 'false') field.filterable = false;
+    if (attr('sap:sortable')   === 'false') field.sortable   = false;
+    if (attr('sap:creatable')  === 'false') field.creatable  = false;
+    if (attr('sap:updatable')  === 'false') field.updatable  = false;
+    if (attr('sap:upsertable') === 'false') field.upsertable = false;
+    if (attr('sap:visible')    === 'false') field.visible    = false;
+
+    const picklist     = attr('sap:picklist');
+    if (picklist) field.picklist = picklist;
+
+    const displayFormat = attr('sap:display-format');
+    if (displayFormat) field.displayFormat = displayFormat;
+
+    if (attr('sap:sensitive-personal-data') === 'true') field.sensitive = true;
 
     fields.push(field);
   }
 
-  return fields.length > 0 ? fields : null;
+  // ── NavigationProperties ───────────────────────────────────────────────────
+  const navFields = [];
+  const navRe = /<NavigationProperty\s([^>]+?)(?:\/>|>[\s\S]*?<\/NavigationProperty>)/g;
+  let n;
+  while ((n = navRe.exec(block)) !== null) {
+    const a = n[1];
+    const attr = (name) => a.match(new RegExp(name.replace(':', '\\:') + '="([^"]+)"'))?.[1];
+
+    const name = attr('Name');
+    if (!name) continue;
+
+    const nav = {
+      name,
+      relationship: attr('Relationship'),
+      fromRole:     attr('FromRole'),
+      toRole:       attr('ToRole'),
+    };
+
+    const label = attr('sap:label');
+    if (label) nav.label = label;
+
+    // Only include capability flags when they're false (non-default)
+    if (attr('sap:upsertable') === 'false') nav.upsertable = false;
+    if (attr('sap:creatable')  === 'false') nav.creatable  = false;
+    if (attr('sap:updatable')  === 'false') nav.updatable  = false;
+    if (attr('sap:filterable') === 'false') nav.filterable = false;
+    if (attr('sap:sortable')   === 'false') nav.sortable   = false;
+    if (attr('sap:visible')    === 'false') nav.visible    = false;
+    if (attr('sap:required')   === 'true')  nav.required   = true;
+
+    const picklist = attr('sap:picklist');
+    if (picklist) nav.picklist = picklist;
+
+    navFields.push(nav);
+  }
+
+  return fields.length > 0 ? { fields, navFields } : null;
 }
 
 // ── Sample-record type inferrer (fallback only) ───────────────────────────────
@@ -223,7 +297,7 @@ function _inferFromSample(record) {
     } else if (typeof val === 'boolean') {
       type = 'Boolean';
     }
-    fields.push({ name: key, type, key: false, required: false, label: key });
+    fields.push({ name: key, type, key: false, required: false, nullable: true });
   }
   return fields;
 }
