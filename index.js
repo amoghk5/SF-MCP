@@ -76,6 +76,7 @@ server.registerTool('sf_metadata', {
     action: z.enum(['get_entity', 'list_entities', 'get_picklist']).describe('What to retrieve'),
     entity: z.string().optional().describe('Entity set name — required for get_entity'),
     picklistId: z.string().optional().describe('Picklist ID — required for get_picklist (e.g. "status")'),
+    forceRefresh: z.boolean().optional().describe('Bypass the 24h schema cache and re-fetch from SF. Use when a field was added or entity definition changed.'),
     connection: connOpt,
   },
 }, async (args) => wrap(sfMetadataHandler, args));
