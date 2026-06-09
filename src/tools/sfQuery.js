@@ -1,5 +1,6 @@
 import { ConnectionRegistry } from '../ConnectionRegistry.js';
 import { sessionCache } from '../auth/SessionCache.js';
+import { EntitySchemaCache } from '../EntitySchemaCache.js';
 
 export const sfQueryTool = {
   name: 'sf_query',
@@ -26,6 +27,11 @@ export const sfQueryTool = {
 export async function sfQueryHandler({ entity, filter, select, expand, top = 20, skip = 0, orderby, inlinecount, fromDate, toDate, effectiveAt, asOfDate, customPageSize, paging, recordStatus, filterParentDate, versionId, rawParams, connection }) {
   const { alias, conn } = ConnectionRegistry.resolve(connection);
   const session = sessionCache.odata(alias, conn);
+
+  // Warm the schema cache in the background — does not block the query.
+  // On a cache hit this is near-instant; on a miss it fetches metadata concurrently
+  // so the schema is ready for any subsequent upsert against the same entity.
+  EntitySchemaCache.fetchAndCache(alias, entity, session).catch(() => {});
 
   const safeTop = Math.min(Math.max(1, top ?? 20), 1000);
   const params = new URLSearchParams();
