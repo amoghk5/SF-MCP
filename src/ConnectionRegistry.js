@@ -72,4 +72,25 @@ export const ConnectionRegistry = {
     if (!conn) throw new Error(`Connection "${key}" not found`);
     return { alias: key, conn };
   },
+
+  setIas(alias, { tenantUrl, clientId, clientSecret }) {
+    const data = load();
+    if (!data.connections[alias]) throw new Error(`Connection "${alias}" not found. Add it with sf_connect first.`);
+    data.connections[alias].ias = { tenantUrl, clientId, clientSecret };
+    save(data);
+  },
+
+  removeIas(alias) {
+    const data = load();
+    if (!data.connections[alias]) throw new Error(`Connection "${alias}" not found`);
+    delete data.connections[alias].ias;
+    save(data);
+  },
+
+  /** Returns { alias, ias } or throws if alias or its IAS sub-config is missing. */
+  getIas(alias) {
+    const { alias: key, conn } = this.resolve(alias);
+    if (!conn.ias) throw new Error(`No IAS credentials configured for alias "${key}" — use ias_connect to add them.`);
+    return { alias: key, ias: conn.ias };
+  },
 };
