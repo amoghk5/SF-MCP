@@ -1,38 +1,22 @@
 import { ConnectionRegistry } from '../ConnectionRegistry.js';
 import { sessionCache } from '../auth/SessionCache.js';
+import { EntitySchemaCache } from '../EntitySchemaCache.js';
 
-export const sfUpsertTool = {
-  name: 'sf_upsert',
-  description: 'Create or update records in any SAP SuccessFactors OData v2 entity. Handles CSRF tokens automatically. Pass a single record object or an array for batch upsert (max 1000). Use sf_metadata first if unsure about required fields.',
+import { z } from 'zod';
+import { connOpt } from './shared.js';
+
+export const sfUpsertSchema = {
+  description: 'Create or update records in any SAP SuccessFactors OData v2 entity. CSRF tokens handled automatically. Pass a single record or array for batch (max 1000). Use sf_metadata first if unsure about required fields.',
   inputSchema: {
-    type: 'object',
-    properties: {
-      entity: { type: 'string', description: 'Entity set name (e.g. "Position", "cust_stressTest4M")' },
-      payload: {
-        description: 'A single record object or array of records to upsert',
-        oneOf: [
-          { type: 'object' },
-          { type: 'array', items: { type: 'object' } },
-        ],
-      },
-      purgeType: {
-        type: 'string',
-        enum: ['incremental', 'full', 'fullPurge', 'record'],
-        description: 'Upsert mode: incremental (default, update only provided fields), full/fullPurge (replace entire record), record (delete+insert)',
-      },
-      workflowConfirmed: {
-        type: 'boolean',
-        description: 'Set true to trigger workflow on upsert for non-admin users. Required when the entity has workflow routing enabled — without it, upsert fails with HTTP 500 for non-admin users. Has no effect for admin users.',
-      },
-      warningAcknowledged: {
-        type: 'boolean',
-        description: 'Set true to bypass warning business rules on upsert for non-admin users. Required when a warning rule fires — without it, upsert fails. Has no effect for admin users.',
-      },
-      connection: { type: 'string', description: 'Connection alias to use. Omit for default.' },
-    },
-    required: ['entity', 'payload'],
+    entity: z.string().describe('Entity set name'),
+    payload: z.union([z.object({}).passthrough(), z.array(z.object({}).passthrough())]).describe('Single record or array of records to upsert'),
+    purgeType: z.enum(['incremental', 'full', 'fullPurge', 'record']).optional().describe('Upsert mode: incremental (default), full/fullPurge (replace record), record (delete+insert)'),
+    workflowConfirmed: z.boolean().optional().describe('Set true to trigger workflow on upsert for non-admin users. Required for workflow-enabled entities — without it, upsert fails with HTTP 500 for non-admin users.'),
+    warningAcknowledged: z.boolean().optional().describe('Set true to bypass warning business rules on upsert for non-admin users. Required when a warning rule fires — without it, upsert fails.'),
+    connection: connOpt,
   },
 };
+
 
 export async function sfUpsertHandler({ entity, payload, purgeType, workflowConfirmed, warningAcknowledged, connection }) {
   const { alias, conn } = ConnectionRegistry.resolve(connection);
@@ -44,6 +28,10 @@ export async function sfUpsertHandler({ entity, payload, purgeType, workflowConf
     return { error: `SF allows max 1000 records per upsert. Got ${records.length}. Split into batches.` };
   }
 
+  // Fetch (or reuse cached) entity schema for dynamic key URI building.
+  // Non-fatal: if metadata is unavailable we fall back to the hardcoded list below.
+  const schema = await EntitySchemaCache.fetchAndCache(alias, entity, session).catch(() => null);
+
   // Auto-convert human-readable dates → SF /Date(ms)/ format
   const converted = records.map(convertDates);
 
@@ -52,9 +40,10 @@ export async function sfUpsertHandler({ entity, payload, purgeType, workflowConf
   for (let i = 0; i < converted.length; i++) {
     const r = converted[i];
     if (r.__metadata?.uri && r.__metadata?.type) { withMeta.push(r); continue; }
-    const uri = buildKeyUri(entity, r);
+    const uri = buildKeyUri(entity, r, schema);
     if (uri === entity) {
-      return { error: `Record at index ${i} has no recognizable key field. Provide __metadata.uri manually or ensure the record has one of: externalCode, code, userId, personIdExternal, positionCode, jobCode, externalId, id, effectiveStartDate, startDate, mdfSystemEffectiveStartDate.` };
+      const keyHint = schema?.keyFields?.map(f => f.name).join(', ') ?? 'externalCode, code, userId, personIdExternal, positionCode, jobCode, externalId, id';
+      return { error: `Record at index ${i} has no recognizable key field. Provide __metadata.uri manually or include one of: ${keyHint}.` };
     }
     withMeta.push({ __metadata: { uri, type: `SFOData.${entity}` }, ...r });
   }
@@ -121,10 +110,35 @@ function convertDates(record) {
 
 /**
  * Builds an SF OData v2 key URI string for __metadata.uri.
- * Handles single-key and composite-key entities.
- * Date values (/Date(...)/) are converted to datetime'...' format expected in key URIs.
+ *
+ * When a schema is provided (from EntitySchemaCache), uses the entity's actual
+ * key fields with type-aware formatting. Falls back to a hardcoded list for
+ * connections or entities where metadata is unavailable.
+ *
+ * Type-to-URI-literal mapping:
+ *   String, Guid       →  'value'
+ *   Int64              →  valueL
+ *   Int16, Int32       →  value
+ *   Decimal, Single,
+ *   Double             →  value (no suffix)
+ *   DateTime           →  datetime'YYYY-MM-DDTHH:MM:SS'
+ *   DateTimeOffset     →  datetimeoffset'...'
+ *   Boolean            →  true | false
  */
-function buildKeyUri(entity, record) {
+function buildKeyUri(entity, record, schema) {
+  // ── Schema-driven path ──────────────────────────────────────────────────────
+  if (schema?.keyFields?.length > 0) {
+    const parts = [];
+    for (const kf of schema.keyFields) {
+      if (record[kf.name] === undefined) continue;
+      const literal = toODataLiteral(kf.name, kf.type, record[kf.name]);
+      if (literal !== null) parts.push(`${kf.name}=${literal}`);
+    }
+    if (parts.length > 0) return `${entity}(${parts.join(',')})`;
+    // All key fields missing from record — fall through to hardcoded
+  }
+
+  // ── Hardcoded fallback ──────────────────────────────────────────────────────
   const SF_KEYS = ['externalCode', 'code', 'userId', 'personIdExternal', 'positionCode', 'jobCode', 'externalId', 'id'];
   const DATE_KEYS = ['effectiveStartDate', 'startDate', 'mdfSystemEffectiveStartDate'];
 
@@ -152,3 +166,47 @@ function buildKeyUri(entity, record) {
   return `${entity}(${keyParts.join(',')})`;
 }
 
+/** Format a field value as an OData v2 URI key literal based on its EDM type. */
+function toODataLiteral(name, type, value) {
+  switch (type) {
+    case 'Int64':
+      return `${value}L`;
+
+    case 'Int16':
+    case 'Int32':
+    case 'Byte':
+    case 'SByte':
+      return String(value);
+
+    case 'Decimal':
+    case 'Single':
+    case 'Double':
+      return String(value);
+
+    case 'Boolean':
+      return value === true || value === 'true' ? 'true' : 'false';
+
+    case 'DateTime': {
+      const raw = String(value);
+      const ms = raw.match(/\/Date\((\d+)\)\//);
+      if (ms) return `datetime'${new Date(Number(ms[1])).toISOString().slice(0, 19)}'`;
+      // Already ISO or datetime' format
+      const clean = raw.replace(/^datetime'/, '').replace(/'$/, '');
+      return `datetime'${clean.slice(0, 19)}'`;
+    }
+
+    case 'DateTimeOffset': {
+      const raw = String(value);
+      const ms = raw.match(/\/Date\((\d+)([+-]\d+)?\)\//);
+      if (ms) return `datetimeoffset'${new Date(Number(ms[1])).toISOString()}'`;
+      return `datetimeoffset'${raw}'`;
+    }
+
+    case 'String':
+    case 'Guid':
+    default: {
+      const escaped = String(value).replace(/'/g, "''");
+      return `'${escaped}'`;
+    }
+  }
+}

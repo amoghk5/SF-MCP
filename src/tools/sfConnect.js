@@ -1,34 +1,26 @@
+import { readFileSync } from 'node:fs';
 import { ConnectionRegistry } from '../ConnectionRegistry.js';
 import { sessionCache } from '../auth/SessionCache.js';
 import { ODataSession } from '../auth/ODataSession.js';
 
-export const sfConnectTool = {
-  name: 'sf_connect',
-  description: 'Manage SuccessFactors connection registry. Actions: list (show all saved connections), add (register a new SF system by alias), remove (delete a connection), set_default (change which connection is used by default), test (verify credentials work).',
+import { z } from 'zod';
+
+export const sfConnectSchema = {
+  description: 'Manage SuccessFactors connection registry. Actions: list (show all saved connections), add (register a new SF system by alias), remove (delete a connection), set_default (change the default), test (verify credentials).',
   inputSchema: {
-    type: 'object',
-    properties: {
-      action: {
-        type: 'string',
-        enum: ['list', 'add', 'remove', 'set_default', 'test'],
-        description: 'Operation to perform',
-      },
-      alias: {
-        type: 'string',
-        description: 'Short name for the connection (e.g. "1143", "t1", "prod")',
-      },
-      apiHost: { type: 'string', description: 'OData API host (e.g. apisalesdemo2.successfactors.eu)' },
-      uiHost: { type: 'string', description: 'UI host for internal APIs (e.g. salesdemo.successfactors.eu)' },
-      username: { type: 'string', description: 'SF API username (usually user@COMPANYID)' },
-      password: { type: 'string', description: 'SF password' },
-      companyId: { type: 'string', description: 'SF company ID (e.g. SFCPART001143)' },
-      conditionalAuthUrl: { type: 'string', description: 'Optional: external IdP URL for SAML login (leave blank for standard SSO)' },
-    },
-    required: ['action'],
+    action: z.enum(['list', 'add', 'remove', 'set_default', 'test']).describe('Operation to perform'),
+    alias: z.string().optional().describe('Short name for the connection (e.g. 1143, t1, prod)'),
+    apiHost: z.string().optional().describe('OData API host (e.g. apisalesdemo2.successfactors.eu)'),
+    companyId: z.string().optional().describe('SF company ID (e.g. SFCPART001143)'),
+    clientId: z.string().optional().describe('OAuth API key (from SF Admin Center > OAuth Client Applications)'),
+    pemPath: z.string().optional().describe('Path to X.509 PEM file downloaded from SF Admin Center'),
+    userId: z.string().optional().describe('SF userId to authenticate as (used as JWT sub claim)'),
+    uiHost: z.string().optional().describe('UI host for internal APIs (e.g. salesdemo.successfactors.eu)'),
   },
 };
 
-export async function sfConnectHandler({ action, alias, apiHost, uiHost, username, password, uiUsername, uiPassword, companyId, conditionalAuthUrl }) {
+
+export async function sfConnectHandler({ action, alias, apiHost, companyId, clientId, pemPath, userId, uiHost }) {
   switch (action) {
     case 'list': {
       const { default: def, connections } = ConnectionRegistry.list();
@@ -38,17 +30,23 @@ export async function sfConnectHandler({ action, alias, apiHost, uiHost, usernam
     }
 
     case 'add': {
-      if (!alias || !apiHost || !username || !password || !companyId) {
-        return { error: 'Required for add: alias, apiHost, username, password, companyId' };
+      if (!alias || !apiHost || !companyId || !clientId || !pemPath || !userId) {
+        return { error: 'Required for add: alias, apiHost, companyId, clientId, pemPath, userId' };
       }
-      const conn = { apiHost, username, password, companyId };
+      let privateKeyBase64;
+      try {
+        const raw = readFileSync(pemPath, 'utf8');
+        const match = raw.match(/-----BEGIN ENCRYPTED PRIVATE KEY-----\r?\n([\s\S]+?)\r?\n-----END ENCRYPTED PRIVATE KEY-----/);
+        if (!match) return { error: 'PEM file does not contain an ENCRYPTED PRIVATE KEY block' };
+        privateKeyBase64 = match[1].replace(/\s/g, '');
+      } catch (err) {
+        return { error: `Cannot read PEM file at "${pemPath}": ${err.message}` };
+      }
+      const conn = { apiHost, companyId, clientId, userId, privateKeyBase64 };
       if (uiHost) conn.uiHost = uiHost;
-      if (uiUsername) conn.uiUsername = uiUsername;
-      if (uiPassword) conn.uiPassword = uiPassword;
-      if (conditionalAuthUrl) conn.conditionalAuthUrl = conditionalAuthUrl;
       sessionCache.invalidate(alias);
       ConnectionRegistry.add(alias, conn);
-      return { text: `Connection "${alias}" saved.${uiUsername ? ' (UI credentials included)' : ''}` };
+      return { text: `Connection "${alias}" saved.` };
     }
 
     case 'remove': {

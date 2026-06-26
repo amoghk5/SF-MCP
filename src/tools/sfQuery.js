@@ -1,37 +1,53 @@
 import { ConnectionRegistry } from '../ConnectionRegistry.js';
 import { sessionCache } from '../auth/SessionCache.js';
+import { EntitySchemaCache } from '../EntitySchemaCache.js';
 
-export const sfQueryTool = {
-  name: 'sf_query',
-  description: 'Read any SAP SuccessFactors OData v2 entity. Use for retrieving HR data like employees, positions, org units, custom MDF objects, etc. Supports filtering, field selection, navigation property expansion, and pagination.',
+import { z } from 'zod';
+import { connOpt } from './shared.js';
+
+export const sfQuerySchema = {
+  description: 'Read any SAP SuccessFactors OData v2 entity. Use for HR data: employees, positions, org units, MDF objects, etc. Supports filtering, pagination, date-effective queries, and server-driven paging.',
   inputSchema: {
-    type: 'object',
-    properties: {
-      entity: { type: 'string', description: 'Entity set name (e.g. "Position", "EmpJob", "User", "cust_stressTest4M")' },
-      filter: { type: 'string', description: 'OData $filter expression (e.g. "effectiveStatus eq \'A\' and jobCode eq \'ENG01\'")', },
-      select: { type: 'string', description: 'Comma-separated field names to return (e.g. "positionCode,jobTitle,costCenter")', },
-      expand: { type: 'string', description: 'Navigation properties to expand (e.g. "department,jobClassification")', },
-      top: { type: 'number', description: 'Max records to return (default 20, max 1000 per call)', default: 20 },
-      skip: { type: 'number', description: 'Records to skip for pagination', default: 0 },
-      orderby: { type: 'string', description: 'Sort expression (e.g. "startDate desc")' },
-      recordStatus: { type: 'string', enum: ['normal', 'pending', 'pendinghistory'], description: 'MDF only. "normal" (default): approved records. "pending": records awaiting workflow approval (requires admin). "pendinghistory": declined/cancelled records (requires admin).' },
-      filterParentDate: { type: 'boolean', description: 'MDF composite child entities only. Set true to apply fromDate/toDate/asOfDate filtering to child records when querying them directly. Default false (date params silently ignored on child entities).' },
-      versionId: { type: 'string', description: 'MDF only. Query a specific version of a pending record. Implicitly returns pending data. Omit to get the latest version.' },
-      connection: { type: 'string', description: 'Connection alias to use. Omit to use the default.' },
-    },
-    required: ['entity'],
+    entity: z.string().describe('Entity set name (e.g. "Position", "EmpJob", "User", "cust_stressTest4M")'),
+    filter: z.string().optional().describe('OData $filter expression (e.g. "effectiveStatus eq \'A\'" or "jobCode eq \'ENG01\'"). Operators: eq, ne, gt, ge, lt, le, and, or, in, like. Functions: startswith, endswith, substringof.'),
+    select: z.string().optional().describe('Comma-separated fields to return'),
+    expand: z.string().optional().describe('Navigation properties to expand'),
+    top: z.number().optional().default(20).describe('Max records (default 20, SF max 1000). Ignored for paging=cursor — use customPageSize instead.'),
+    skip: z.number().optional().default(0).describe('Records to skip for pagination. Ignored for paging=cursor/snapshot.'),
+    orderby: z.string().optional().describe('Sort expression (e.g. "startDate desc")'),
+    inlinecount: z.boolean().optional().describe('Set true to get total record count in response (adds $inlinecount=allpages)'),
+    fromDate: z.string().optional().describe('Start date for effective-dated entities (e.g. "2024-01-01")'),
+    toDate: z.string().optional().describe('End date for effective-dated entities (e.g. "2024-12-31")'),
+    effectiveAt: z.string().optional().describe('Point-in-time for effective-dated queries'),
+    asOfDate: z.string().optional().describe('As-of date for queries'),
+    customPageSize: z.number().optional().describe('Override page size for server-driven paging (must be < 1000). Use with paging=cursor/snapshot instead of top.'),
+    paging: z.enum(['cursor', 'snapshot']).optional().describe('Server-side pagination mode. cursor: full extracts, follow __next links, do not set top. snapshot: supports $filter/$orderby, max 300k records, do not set top/$skip.'),
+    recordStatus: z.enum(['normal', 'pending', 'pendinghistory']).optional().describe('MDF only. normal: approved records. pending: awaiting workflow (admin only). pendinghistory: declined/cancelled (admin only).'),
+    filterParentDate: z.boolean().optional().describe('MDF composite child entities only. Set true to apply date params to child records when querying them directly.'),
+    versionId: z.string().optional().describe('MDF only. Query a specific version of a pending record.'),
+    rawParams: z.object({}).passthrough().optional().describe('Any additional query params as key-value pairs (pass-through to SF)'),
+    connection: connOpt,
   },
 };
+
 
 export async function sfQueryHandler({ entity, filter, select, expand, top = 20, skip = 0, orderby, inlinecount, fromDate, toDate, effectiveAt, asOfDate, customPageSize, paging, recordStatus, filterParentDate, versionId, rawParams, connection }) {
   const { alias, conn } = ConnectionRegistry.resolve(connection);
   const session = sessionCache.odata(alias, conn);
 
+  // Warm the schema cache in the background — does not block the query.
+  // On a cache hit this is near-instant; on a miss it fetches metadata concurrently
+  // so the schema is ready for any subsequent upsert against the same entity.
+  EntitySchemaCache.fetchAndCache(alias, entity, session).catch(() => {});
+
+  // paging=snapshot rejects $top/$skip; paging=cursor needs no $top to return __next
+  const isSnapshot = paging === 'snapshot';
+  const isCursor = paging === 'cursor';
   const safeTop = Math.min(Math.max(1, top ?? 20), 1000);
   const params = new URLSearchParams();
   params.set('$format', 'json');
-  params.set('$top', String(safeTop));
-  if (skip) params.set('$skip', String(skip));
+  if (!isSnapshot && !isCursor) params.set('$top', String(safeTop));
+  if (!isSnapshot && !isCursor && skip) params.set('$skip', String(skip));
   if (filter) params.set('$filter', filter);
   if (select) params.set('$select', select);
   if (expand) params.set('$expand', expand);
