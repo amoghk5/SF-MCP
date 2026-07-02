@@ -2,7 +2,7 @@ import { ConnectionRegistry } from '../ConnectionRegistry.js';
 import { sessionCache } from '../auth/SessionCache.js';
 
 import { z } from 'zod';
-import { connOpt } from './shared.js';
+import { connOpt, userIdOpt } from './shared.js';
 
 export const sfFunctionSchema = {
   description: 'Call an SAP SuccessFactors OData v2 function import (custom function), e.g. RBP functions like getExpandedDynamicGroupById, getUserRolesByUserId, checkUserPermission, updateStaticGroup, upsert (Dynamic Group). GET-style functions take query params; POST-style functions (like upsert) take a JSON body.',
@@ -12,6 +12,7 @@ export const sfFunctionSchema = {
     body: z.object({}).passthrough().optional().describe('JSON payload for POST-body function imports (e.g. the DynamicGroup definition for "upsert"). Presence of body implies method=POST unless overridden.'),
     method: z.enum(['GET', 'POST']).optional().describe('HTTP method. Defaults to POST if body is provided, otherwise GET.'),
     connection: connOpt,
+    userId: userIdOpt,
   },
 };
 
@@ -30,9 +31,9 @@ function formatParamValue(value) {
   return String(value);
 }
 
-export async function sfFunctionHandler({ functionName, params, body, method, connection }) {
-  const { alias, conn } = ConnectionRegistry.resolve(connection);
-  const session = sessionCache.odata(alias, conn);
+export async function sfFunctionHandler({ functionName, params, body, method, connection, userId }) {
+  const { alias, conn, userId: resolvedUserId } = ConnectionRegistry.resolveUser(connection, userId);
+  const session = sessionCache.odata(`${alias}::${resolvedUserId}`, { ...conn, userId: resolvedUserId });
 
   const httpMethod = method ?? (body ? 'POST' : 'GET');
 

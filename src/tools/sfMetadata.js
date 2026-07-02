@@ -3,7 +3,7 @@ import { sessionCache } from '../auth/SessionCache.js';
 import { EntitySchemaCache } from '../EntitySchemaCache.js';
 
 import { z } from 'zod';
-import { connOpt } from './shared.js';
+import { connOpt, userIdOpt } from './shared.js';
 
 export const sfMetadataSchema = {
   description: 'Explore the SF data model. get_entity: field names/types for one entity. list_entities: all available entity sets. get_picklist: valid option codes for a picklist. Results are cached.',
@@ -13,13 +13,14 @@ export const sfMetadataSchema = {
     picklistId: z.string().optional().describe('Picklist ID — required for get_picklist (e.g. "status")'),
     forceRefresh: z.boolean().optional().describe('Bypass the 24h schema cache and re-fetch from SF. Use when a field was added or entity definition changed.'),
     connection: connOpt,
+    userId: userIdOpt,
   },
 };
 
 
-export async function sfMetadataHandler({ action, entity, picklistId, forceRefresh = false, connection }) {
-  const { alias, conn } = ConnectionRegistry.resolve(connection);
-  const session = sessionCache.odata(alias, conn);
+export async function sfMetadataHandler({ action, entity, picklistId, forceRefresh = false, connection, userId }) {
+  const { alias, conn, userId: resolvedUserId } = ConnectionRegistry.resolveUser(connection, userId);
+  const session = sessionCache.odata(`${alias}::${resolvedUserId}`, { ...conn, userId: resolvedUserId });
 
   switch (action) {
     case 'get_entity': {

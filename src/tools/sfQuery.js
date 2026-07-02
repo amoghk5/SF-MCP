@@ -3,7 +3,7 @@ import { sessionCache } from '../auth/SessionCache.js';
 import { EntitySchemaCache } from '../EntitySchemaCache.js';
 
 import { z } from 'zod';
-import { connOpt } from './shared.js';
+import { connOpt, userIdOpt } from './shared.js';
 
 export const sfQuerySchema = {
   description: 'Read any SAP SuccessFactors OData v2 entity. Use for HR data: employees, positions, org units, MDF objects, etc. Supports filtering, pagination, date-effective queries, and server-driven paging.',
@@ -27,13 +27,14 @@ export const sfQuerySchema = {
     versionId: z.string().optional().describe('MDF only. Query a specific version of a pending record.'),
     rawParams: z.object({}).passthrough().optional().describe('Any additional query params as key-value pairs (pass-through to SF)'),
     connection: connOpt,
+    userId: userIdOpt,
   },
 };
 
 
-export async function sfQueryHandler({ entity, filter, select, expand, top = 20, skip = 0, orderby, inlinecount, fromDate, toDate, effectiveAt, asOfDate, customPageSize, paging, recordStatus, filterParentDate, versionId, rawParams, connection }) {
-  const { alias, conn } = ConnectionRegistry.resolve(connection);
-  const session = sessionCache.odata(alias, conn);
+export async function sfQueryHandler({ entity, filter, select, expand, top = 20, skip = 0, orderby, inlinecount, fromDate, toDate, effectiveAt, asOfDate, customPageSize, paging, recordStatus, filterParentDate, versionId, rawParams, connection, userId }) {
+  const { alias, conn, userId: resolvedUserId } = ConnectionRegistry.resolveUser(connection, userId);
+  const session = sessionCache.odata(`${alias}::${resolvedUserId}`, { ...conn, userId: resolvedUserId });
 
   // Warm the schema cache in the background — does not block the query.
   // On a cache hit this is near-instant; on a miss it fetches metadata concurrently

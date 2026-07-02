@@ -26,6 +26,15 @@ export class SessionCache {
     delete this._ias[alias];
   }
 
+  /** Drops all cached ODataSessions for an alias, across every userId (key form "alias::userId"). */
+  invalidateAlias(alias) {
+    const prefix = `${alias}::`;
+    for (const key of Object.keys(this._odata)) {
+      if (key.startsWith(prefix)) delete this._odata[key];
+    }
+    delete this._ias[alias];
+  }
+
   invalidateIas(alias) {
     delete this._ias[alias];
   }

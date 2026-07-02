@@ -3,7 +3,7 @@ import { sessionCache } from '../auth/SessionCache.js';
 import { EntitySchemaCache } from '../EntitySchemaCache.js';
 
 import { z } from 'zod';
-import { connOpt } from './shared.js';
+import { connOpt, userIdOpt } from './shared.js';
 
 export const sfUpsertSchema = {
   description: 'Create or update records in any SAP SuccessFactors OData v2 entity. CSRF tokens handled automatically. Pass a single record or array for batch (max 1000). Use sf_metadata first if unsure about required fields.',
@@ -14,13 +14,14 @@ export const sfUpsertSchema = {
     workflowConfirmed: z.boolean().optional().describe('Set true to trigger workflow on upsert for non-admin users. Required for workflow-enabled entities — without it, upsert fails with HTTP 500 for non-admin users.'),
     warningAcknowledged: z.boolean().optional().describe('Set true to bypass warning business rules on upsert for non-admin users. Required when a warning rule fires — without it, upsert fails.'),
     connection: connOpt,
+    userId: userIdOpt,
   },
 };
 
 
-export async function sfUpsertHandler({ entity, payload, purgeType, workflowConfirmed, warningAcknowledged, connection }) {
-  const { alias, conn } = ConnectionRegistry.resolve(connection);
-  const session = sessionCache.odata(alias, conn);
+export async function sfUpsertHandler({ entity, payload, purgeType, workflowConfirmed, warningAcknowledged, connection, userId }) {
+  const { alias, conn, userId: resolvedUserId } = ConnectionRegistry.resolveUser(connection, userId);
+  const session = sessionCache.odata(`${alias}::${resolvedUserId}`, { ...conn, userId: resolvedUserId });
 
   const records = Array.isArray(payload) ? payload : [payload];
 
