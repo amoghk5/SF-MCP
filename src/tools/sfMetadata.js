@@ -1,9 +1,12 @@
 import { ConnectionRegistry } from '../ConnectionRegistry.js';
 import { sessionCache } from '../auth/SessionCache.js';
 import { EntitySchemaCache } from '../EntitySchemaCache.js';
+import * as DB from '../MetadataDB.js';
 
 import { z } from 'zod';
 import { connOpt } from './shared.js';
+
+const PICKLIST_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export const sfMetadataSchema = {
   description: 'Explore the SF data model. get_entity: field names/types for one entity. list_entities: all available entity sets. get_picklist: valid option codes for a picklist. Results are cached.',
@@ -33,8 +36,10 @@ export async function sfMetadataHandler({ action, entity, picklistId, forceRefre
         entity,
         cached: !forceRefresh,
         fieldCount: schema.fields.length,
+        navFieldCount: schema.navFields.length,
         keyFields: schema.keyFields.map(f => f.name),
         fields: schema.fields,
+        navFields: schema.navFields,
       };
     }
 
@@ -48,6 +53,15 @@ export async function sfMetadataHandler({ action, entity, picklistId, forceRefre
 
     case 'get_picklist': {
       if (!picklistId) return { error: 'picklistId is required for get_picklist' };
+
+      // Cache check
+      if (!forceRefresh) {
+        const cached = DB.getPicklist(alias, picklistId);
+        if (cached && Date.now() - cached.fetchedAt <= PICKLIST_TTL_MS) {
+          return { connection: alias, picklistId, cached: true, options: cached.options };
+        }
+      }
+
       const res = await session.request('GET', `/Picklist('${picklistId}')/picklistOptions?$select=id,externalCode,mdfExternalCode,sortOrder,status&$format=json`);
       if (!res.ok) return { error: `Picklist "${picklistId}" not found (${res.status})` };
       const data = await res.json();
@@ -58,7 +72,11 @@ export async function sfMetadataHandler({ action, entity, picklistId, forceRefre
           sortOrder: o.sortOrder,
           active: o.status === 'ACTIVE',
         })).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
-      return { connection: alias, picklistId, options };
+
+      // Persist to SQLite
+      try { DB.setPicklist(alias, picklistId, null, options); } catch { /* best-effort */ }
+
+      return { connection: alias, picklistId, cached: false, options };
     }
 
     default:
