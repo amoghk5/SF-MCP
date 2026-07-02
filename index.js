@@ -7,6 +7,7 @@ import { sfUpsertSchema, sfUpsertHandler } from './src/tools/sfUpsert.js';
 import { sfMetadataSchema, sfMetadataHandler } from './src/tools/sfMetadata.js';
 import { iasConnectSchema, iasConnectHandler } from './src/tools/iasConnect.js';
 import { iasUserSchema, iasUserHandler } from './src/tools/iasUser.js';
+import { sfFunctionSchema, sfFunctionHandler } from './src/tools/sfFunction.js';
 
 const server = new McpServer({
   name: 'sf-mcp-server',
@@ -21,6 +22,7 @@ server.registerTool('sf_upsert',  sfUpsertSchema,  async (args) => wrap(sfUpsert
 server.registerTool('sf_metadata',sfMetadataSchema,async (args) => wrap(sfMetadataHandler,args));
 server.registerTool('ias_connect',iasConnectSchema,async (args) => wrap(iasConnectHandler,args));
 server.registerTool('ias_user',  iasUserSchema,   async (args) => wrap(iasUserHandler,  args));
+server.registerTool('sf_function',sfFunctionSchema,async (args) => wrap(sfFunctionHandler,args));
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
