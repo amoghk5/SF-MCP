@@ -8,14 +8,17 @@ export const sfFunctionSchema = {
   description: 'Call an SAP SuccessFactors OData v2 function import (custom function), e.g. RBP functions like getExpandedDynamicGroupById, getUserRolesByUserId, checkUserPermission, updateStaticGroup, upsert (Dynamic Group). GET-style functions take query params; POST-style functions (like upsert) take a JSON body.',
   inputSchema: {
     functionName: z.string().describe('Function import name (e.g. "getExpandedDynamicGroupById", "checkUserPermission", "upsert")'),
-    params: z.object({}).passthrough().optional().describe('Query-string parameters. Strings are auto single-quoted and escaped for OData (e.g. "Carla Grant" -> \'Carla Grant\'). Numbers/booleans pass through unquoted. To pass a Long, a pre-quoted string, or any other exact literal, just pass a string that already looks like a valid OData literal (e.g. "1234L", "\'already quoted\'", "true") and it will be used as-is.'),
+    params: z.object({}).passthrough().optional().describe('Query-string parameters. Strings are auto single-quoted and escaped for OData (e.g. "Carla Grant" -> \'Carla Grant\', and "355750" -> \'355750\' since numeric-looking IDs like userId are usually Edm.String in SF). JS numbers/booleans pass through unquoted. To pass a Long, give it an explicit "L" suffix as a string (e.g. "1234L") — this is the only case treated as a raw literal instead of being quoted. A value already wrapped in single quotes is also passed through as-is.'),
     body: z.object({}).passthrough().optional().describe('JSON payload for POST-body function imports (e.g. the DynamicGroup definition for "upsert"). Presence of body implies method=POST unless overridden.'),
     method: z.enum(['GET', 'POST']).optional().describe('HTTP method. Defaults to POST if body is provided, otherwise GET.'),
     connection: connOpt,
   },
 };
 
-const RAW_LITERAL_RE = /^(-?\d+(\.\d+)?L?|true|false)$/i;
+// Only an explicit Long suffix ("1234L") or a bare boolean is treated as a raw
+// literal — plain digit strings (e.g. a numeric userId) are Edm.String in SF
+// and must stay quoted, so we don't guess based on digits alone.
+const RAW_LITERAL_RE = /^(-?\d+(\.\d+)?L|true|false)$/i;
 
 function formatParamValue(value) {
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
