@@ -123,12 +123,35 @@ CREATE TABLE IF NOT EXISTS picklist_options (
   FOREIGN KEY (alias, picklist_code) REFERENCES picklist_defs(alias, picklist_code) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS function_imports (
+  alias             TEXT    NOT NULL,
+  function_name     TEXT    NOT NULL,
+  return_type       TEXT,
+  entity_set        TEXT,
+  http_method       TEXT    NOT NULL DEFAULT 'GET',
+  supports_payload  INTEGER NOT NULL DEFAULT 0,
+  description       TEXT,
+  tags              TEXT,
+  fetched_at        INTEGER NOT NULL,
+  PRIMARY KEY (alias, function_name)
+);
+
+CREATE TABLE IF NOT EXISTS function_import_params (
+  alias         TEXT    NOT NULL,
+  function_name TEXT    NOT NULL,
+  name          TEXT    NOT NULL,
+  type          TEXT    NOT NULL DEFAULT 'String',
+  PRIMARY KEY (alias, function_name, name),
+  FOREIGN KEY (alias, function_name) REFERENCES function_imports(alias, function_name) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_fields_entity     ON fields(alias, entity_code);
 CREATE INDEX IF NOT EXISTS idx_fields_picklist   ON fields(alias, picklist_code) WHERE picklist_code IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_nav_entity        ON nav_fields(alias, entity_code);
 CREATE INDEX IF NOT EXISTS idx_nav_target        ON nav_fields(alias, target_entity) WHERE target_entity IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_picklist_opts     ON picklist_options(alias, picklist_code);
 CREATE INDEX IF NOT EXISTS idx_entities_fo       ON entities(alias, is_foundation_entity) WHERE is_foundation_entity = 1;
+CREATE INDEX IF NOT EXISTS idx_fnimport_params   ON function_import_params(alias, function_name);
 `;
 
 // ── Singleton DB handle ───────────────────────────────────────────────────────
@@ -393,6 +416,8 @@ export function deleteAlias(alias) {
     stmt('DELETE FROM entities WHERE alias = ?').run(alias);
     stmt('DELETE FROM picklist_options WHERE alias = ?').run(alias);
     stmt('DELETE FROM picklist_defs WHERE alias = ?').run(alias);
+    stmt('DELETE FROM function_import_params WHERE alias = ?').run(alias);
+    stmt('DELETE FROM function_imports WHERE alias = ?').run(alias);
     stmt('DELETE FROM etag_cache WHERE alias = ?').run(alias);
     db().exec('COMMIT');
   } catch (err) {
@@ -406,6 +431,94 @@ export function listEntities(alias) {
   return stmt('SELECT entity_code, fetched_at FROM entities WHERE alias = ?')
     .all(alias)
     .map(r => ({ entityCode: r.entity_code, fetchedAt: r.fetched_at }));
+}
+
+// ── Function import operations ─────────────────────────────────────────────────
+
+/**
+ * Retrieve one cached function import, with its parameters.
+ * @returns {{ name, returnType, entitySet, httpMethod, supportsPayload, description, tags, params, fetchedAt }|null}
+ */
+export function getFunctionImport(alias, functionName) {
+  const row = stmt(
+    'SELECT * FROM function_imports WHERE alias = ? AND function_name = ?'
+  ).get(alias, functionName);
+  if (!row) return null;
+
+  const params = stmt(
+    'SELECT name, type FROM function_import_params WHERE alias = ? AND function_name = ? ORDER BY rowid'
+  ).all(alias, functionName);
+
+  return {
+    name: row.function_name,
+    returnType: row.return_type ?? null,
+    entitySet: row.entity_set ?? null,
+    httpMethod: row.http_method,
+    supportsPayload: row.supports_payload === 1,
+    description: row.description ?? undefined,
+    tags: row.tags ? JSON.parse(row.tags) : [],
+    params,
+    fetchedAt: row.fetched_at,
+  };
+}
+
+/** Persist one function import + its parameters atomically. Replaces any existing row. */
+export function setFunctionImport(alias, functionName, def) {
+  const d = db();
+  d.exec('BEGIN');
+  try {
+    stmt(`INSERT OR REPLACE INTO function_imports
+      (alias, function_name, return_type, entity_set, http_method, supports_payload, description, tags, fetched_at)
+      VALUES (?,?,?,?,?,?,?,?,?)`).run(
+      alias, functionName,
+      def.returnType ?? null,
+      def.entitySet ?? null,
+      def.httpMethod ?? 'GET',
+      def.supportsPayload ? 1 : 0,
+      def.description ?? null,
+      def.tags?.length ? JSON.stringify(def.tags) : null,
+      Date.now()
+    );
+
+    stmt('DELETE FROM function_import_params WHERE alias = ? AND function_name = ?').run(alias, functionName);
+
+    const insParam = stmt(
+      'INSERT INTO function_import_params (alias, function_name, name, type) VALUES (?,?,?,?)'
+    );
+    for (const p of def.params ?? []) {
+      insParam.run(alias, functionName, p.name, p.type ?? 'String');
+    }
+
+    d.exec('COMMIT');
+  } catch (err) {
+    d.exec('ROLLBACK');
+    throw err;
+  }
+}
+
+/** Remove one function import and its parameters from the DB. */
+export function deleteFunctionImport(alias, functionName) {
+  db().exec('BEGIN');
+  try {
+    stmt('DELETE FROM function_import_params WHERE alias = ? AND function_name = ?').run(alias, functionName);
+    stmt('DELETE FROM function_imports WHERE alias = ? AND function_name = ?').run(alias, functionName);
+    db().exec('COMMIT');
+  } catch (err) {
+    db().exec('ROLLBACK');
+    throw err;
+  }
+}
+
+/** List all function imports cached for an alias (summary only — no params). */
+export function listFunctionImports(alias) {
+  return stmt(
+    'SELECT function_name, return_type, http_method, fetched_at FROM function_imports WHERE alias = ?'
+  ).all(alias).map(r => ({
+    name: r.function_name,
+    returnType: r.return_type ?? null,
+    httpMethod: r.http_method,
+    fetchedAt: r.fetched_at,
+  }));
 }
 
 // ── ETag operations ───────────────────────────────────────────────────────────

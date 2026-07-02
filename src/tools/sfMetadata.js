@@ -9,11 +9,12 @@ import { connOpt, userIdOpt } from './shared.js';
 const PICKLIST_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export const sfMetadataSchema = {
-  description: 'Explore the SF data model. get_entity: field names/types for one entity. list_entities: all available entity sets. get_picklist: valid option codes for a picklist. Results are cached.',
+  description: 'Explore the SF data model. get_entity: field names/types for one entity. list_entities: all available entity sets. get_picklist: valid option codes for a picklist. list_functions: all function imports (RBP checks, etc.) with their return type. get_function: input parameters + types for one function import — use this before calling sf_function to know what args it expects. Results are cached.',
   inputSchema: {
-    action: z.enum(['get_entity', 'list_entities', 'get_picklist']).describe('What to retrieve'),
+    action: z.enum(['get_entity', 'list_entities', 'get_picklist', 'list_functions', 'get_function']).describe('What to retrieve'),
     entity: z.string().optional().describe('Entity set name — required for get_entity'),
     picklistId: z.string().optional().describe('Picklist ID — required for get_picklist (e.g. "status")'),
+    functionName: z.string().optional().describe('Function import name — required for get_function (e.g. "checkUserPermission")'),
     forceRefresh: z.boolean().optional().describe('Bypass the 24h schema cache and re-fetch from SF. Use when a field was added or entity definition changed.'),
     connection: connOpt,
     userId: userIdOpt,
@@ -21,7 +22,7 @@ export const sfMetadataSchema = {
 };
 
 
-export async function sfMetadataHandler({ action, entity, picklistId, forceRefresh = false, connection, userId }) {
+export async function sfMetadataHandler({ action, entity, picklistId, functionName, forceRefresh = false, connection, userId }) {
   const { alias, conn, userId: resolvedUserId } = ConnectionRegistry.resolveUser(connection, userId);
   const session = sessionCache.odata(`${alias}::${resolvedUserId}`, { ...conn, userId: resolvedUserId });
 
@@ -78,6 +79,31 @@ export async function sfMetadataHandler({ action, entity, picklistId, forceRefre
       try { DB.setPicklist(alias, picklistId, null, options); } catch { /* best-effort */ }
 
       return { connection: alias, picklistId, cached: false, options };
+    }
+
+    case 'list_functions': {
+      const functions = await EntitySchemaCache.fetchAndCacheFunctionImports(alias, session, { forceRefresh });
+      return { connection: alias, functions };
+    }
+
+    case 'get_function': {
+      if (!functionName) return { error: 'functionName is required for get_function' };
+
+      await EntitySchemaCache.fetchAndCacheFunctionImports(alias, session, { forceRefresh });
+      const def = EntitySchemaCache.getFunctionImport(alias, functionName);
+      if (!def) return { error: `Function import "${functionName}" not found in $metadata` };
+
+      return {
+        connection: alias,
+        functionName,
+        returnType: def.returnType,
+        entitySet: def.entitySet,
+        httpMethod: def.httpMethod,
+        supportsPayload: def.supportsPayload,
+        description: def.description,
+        tags: def.tags,
+        params: def.params,
+      };
     }
 
     default:

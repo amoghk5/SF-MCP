@@ -168,6 +168,40 @@ export const EntitySchemaCache = {
 
     return null;
   },
+
+  /** Function imports cached for an alias (summary only — name/returnType/httpMethod, no params). */
+  listFunctionImports(alias) {
+    return DB.listFunctionImports(alias);
+  },
+
+  /** One function import's full definition, including parameters. Returns null if not cached. */
+  getFunctionImport(alias, functionName) {
+    return DB.getFunctionImport(alias, functionName);
+  },
+
+  /**
+   * Ensures every function import for an alias is parsed + cached (single full-metadata
+   * fetch/parse pass, since FunctionImport declarations only exist in the full $metadata,
+   * never the per-entity endpoint). Returns the summary list (same shape as listFunctionImports).
+   */
+  async fetchAndCacheFunctionImports(alias, session, { forceRefresh = false } = {}) {
+    if (!forceRefresh) {
+      const cached = DB.listFunctionImports(alias);
+      if (cached.length > 0) {
+        const freshest = Math.max(...cached.map(c => c.fetchedAt));
+        if (Date.now() - freshest <= TTL_MS) return cached;
+      }
+    }
+
+    const xml = await _fetchFullMetadata(alias, session);
+    if (!xml) return DB.listFunctionImports(alias); // best-effort: serve whatever's already cached
+
+    const maps = _getMaps(alias);
+    for (const def of Object.values(maps?.functionImportMap ?? {})) {
+      DB.setFunctionImport(alias, def.name, def);
+    }
+    return DB.listFunctionImports(alias);
+  },
 };
 
 // ── Full $metadata fetcher (ETag-based) ───────────────────────────────────────
@@ -212,8 +246,58 @@ function _getMaps(alias) {
     entityKeyMap:     _buildEntityKeyMap(xml),
     foundationObjectSet: _buildFoundationObjectSet(xml),
     entityMetaMap:    _buildEntityMetaMap(xml),
+    functionImportMap: _buildFunctionImportMap(xml),
   };
   return _maps[alias];
+}
+
+/**
+ * FunctionImport map: functionName → { name, returnType, entitySet, httpMethod,
+ * supportsPayload, description, tags, params: [{ name, type }] }.
+ *
+ * FunctionImports live inside <EntityContainer> (like EntitySet/AssociationSet) and
+ * declare their input Parameters as child elements — this is the piece sf_function
+ * needs to know what arguments a given function import actually takes.
+ */
+function _buildFunctionImportMap(xml) {
+  const map = {};
+  const re = /<FunctionImport\s([^>]+?)(?:\/>|>([\s\S]*?)<\/FunctionImport>)/g;
+  let m;
+  while ((m = re.exec(xml)) !== null) {
+    const attrs = m[1];
+    const body = m[2] ?? '';
+    const attr = (nm) => attrs.match(new RegExp(nm.replace(':', '\\:') + '="([^"]+)"'))?.[1];
+
+    const name = attr('Name');
+    if (!name) continue;
+
+    const params = [];
+    const paramRe = /<Parameter\s([^>]+?)(?:\/>|>[\s\S]*?<\/Parameter>)/g;
+    let p;
+    while ((p = paramRe.exec(body)) !== null) {
+      const pAttrs = p[1];
+      const pAttr = (nm) => pAttrs.match(new RegExp(nm + '="([^"]+)"'))?.[1];
+      const pName = pAttr('Name');
+      if (!pName) continue;
+      params.push({ name: pName, type: pAttr('Type')?.replace('Edm.', '') ?? 'String' });
+    }
+
+    const summary  = body.match(/<Summary[^>]*>([\s\S]*?)<\/Summary>/)?.[1]?.trim();
+    const longDesc = body.match(/<LongDescription[^>]*>([\s\S]*?)<\/LongDescription>/)?.[1]?.trim();
+    const tags = [...body.matchAll(/<sap:tag[^>]*>([^<]+)<\/sap:tag>/g)].map(t => t[1].trim());
+
+    map[name] = {
+      name,
+      returnType: attr('ReturnType')?.replace(/^Edm\./, '') ?? null,
+      entitySet: attr('EntitySet') ?? null,
+      httpMethod: attr('m:HttpMethod') ?? 'GET',
+      supportsPayload: attr('sap:support-payload') === 'true',
+      description: (longDesc || summary) || undefined,
+      tags,
+      params,
+    };
+  }
+  return map;
 }
 
 /**
